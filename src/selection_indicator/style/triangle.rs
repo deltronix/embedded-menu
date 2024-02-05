@@ -1,15 +1,19 @@
 use embedded_graphics::{
-    pixelcolor::BinaryColor,
-    prelude::{DrawTarget, Point, Size},
+    prelude::{DrawTarget, PixelColor, Point, Size},
     primitives::{ContainsPoint, Primitive, PrimitiveStyle, Rectangle, Triangle as TriangleShape},
+    transform::Transform,
     Drawable,
 };
-use embedded_layout::{
-    prelude::{horizontal::LeftToRight, vertical::Center, Align},
-    View,
-};
+use embedded_layout::prelude::{horizontal::LeftToRight, vertical::Center, Align};
 
-use crate::selection_indicator::{style::IndicatorStyle, Insets};
+use crate::{
+    interaction::InputState,
+    selection_indicator::{
+        style::{interpolate, IndicatorStyle},
+        Insets,
+    },
+    theme::Theme,
+};
 
 #[derive(Clone, Copy)]
 pub struct Triangle;
@@ -18,9 +22,9 @@ impl IndicatorStyle for Triangle {
     type Shape = Arrow;
     type State = ();
 
-    fn margin(&self, _state: &Self::State, height: u32) -> Insets {
+    fn padding(&self, _state: &Self::State, height: i32) -> Insets {
         Insets {
-            left: height as i32 / 2 + 1,
+            left: height / 2 + 1,
             top: 0,
             right: 0,
             bottom: 0,
@@ -31,15 +35,30 @@ impl IndicatorStyle for Triangle {
         Arrow::new(bounds, fill_width)
     }
 
-    fn draw<D>(&self, state: &Self::State, fill_width: u32, display: &mut D) -> Result<(), D::Error>
+    fn draw<T, D>(
+        &self,
+        state: &Self::State,
+        input_state: InputState,
+        theme: &T,
+        display: &mut D,
+    ) -> Result<Self::Shape, D::Error>
     where
-        D: DrawTarget<Color = BinaryColor>,
+        T: Theme,
+        D: DrawTarget<Color = T::Color>,
     {
         let display_area = display.bounding_box();
 
-        self.shape(state, display_area, fill_width).draw(display)?;
+        let fill_width = if let InputState::InProgress(progress) = input_state {
+            interpolate(progress as u32, 0, 255, 0, display_area.size.width)
+        } else {
+            0
+        };
 
-        Ok(())
+        let shape = self.shape(state, display_area, fill_width);
+
+        shape.draw(theme.selection_color(), display)?;
+
+        Ok(shape)
     }
 }
 
@@ -73,6 +92,19 @@ impl Arrow {
     pub fn tip_width(bounds: Rectangle) -> i32 {
         bounds.size.height as i32 - 1 - SHRINK
     }
+
+    pub fn draw<D, C>(&self, color: C, target: &mut D) -> Result<(), D::Error>
+    where
+        C: PixelColor,
+        D: DrawTarget<Color = C>,
+    {
+        let style = PrimitiveStyle::with_fill(color);
+
+        self.body.into_styled(style).draw(target)?;
+        self.tip.into_styled(style).draw(target)?;
+
+        Ok(())
+    }
 }
 
 impl ContainsPoint for Arrow {
@@ -81,33 +113,17 @@ impl ContainsPoint for Arrow {
     }
 }
 
-impl View for Arrow {
-    fn translate_impl(&mut self, by: Point) {
+impl Transform for Arrow {
+    fn translate(&self, by: Point) -> Self {
+        Self {
+            body: self.body.translate(by),
+            tip: self.tip.translate(by),
+        }
+    }
+
+    fn translate_mut(&mut self, by: Point) -> &mut Self {
         self.body.translate_mut(by);
         self.tip.translate_mut(by);
-    }
-
-    fn bounds(&self) -> Rectangle {
-        Rectangle::new(
-            self.body.top_left,
-            self.body.size + Size::new(self.tip.size().width, 0),
-        )
-    }
-}
-
-impl Drawable for Arrow {
-    type Color = BinaryColor;
-    type Output = ();
-
-    fn draw<D>(&self, target: &mut D) -> Result<Self::Output, D::Error>
-    where
-        D: DrawTarget<Color = Self::Color>,
-    {
-        let style = PrimitiveStyle::with_fill(BinaryColor::On);
-
-        self.body.into_styled(style).draw(target)?;
-        self.tip.into_styled(style).draw(target)?;
-
-        Ok(())
+        self
     }
 }

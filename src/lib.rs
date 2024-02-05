@@ -6,28 +6,32 @@ pub mod collection;
 pub mod interaction;
 pub mod items;
 pub mod selection_indicator;
+pub mod theme;
 
 mod margin;
 
 use crate::{
     builder::MenuBuilder,
     collection::MenuItemCollection,
-    interaction::{programmed::Programmed, InteractionController, InteractionType},
-    margin::MarginExt,
+    interaction::{
+        programmed::Programmed, Action, InputAdapter, InputAdapterSource, InputResult, InputState,
+        Interaction, Navigation,
+    },
     selection_indicator::{
         style::{line::Line as LineIndicator, IndicatorStyle},
         AnimatedPosition, Indicator, SelectionIndicatorController, State as IndicatorState,
         StaticPosition,
     },
+    theme::Theme,
 };
 use core::marker::PhantomData;
 use embedded_graphics::{
     draw_target::DrawTarget,
     geometry::{AnchorPoint, AnchorX, AnchorY},
     mono_font::{ascii::FONT_6X10, MonoFont, MonoTextStyle},
-    pixelcolor::{BinaryColor, PixelColor, Rgb888},
+    pixelcolor::BinaryColor,
     prelude::{Dimensions, DrawTargetExt, Point},
-    primitives::{Line, Primitive, PrimitiveStyle},
+    primitives::{Line, Primitive, PrimitiveStyle, Rectangle},
     Drawable,
 };
 use embedded_layout::{layout::linear::LinearLayout, prelude::*, view_group::ViewGroup};
@@ -36,57 +40,7 @@ use embedded_text::{
     TextBox,
 };
 
-pub use embedded_menu_macros::{Menu, SelectValue};
-
-/// Marker trait necessary to avoid a "conflicting implementations" error.
-pub trait Marker {}
-
-pub trait MenuItem<D>: Marker + View {
-    fn interact(&mut self) -> D;
-    fn set_style<C, S, IT, P>(&mut self, style: &MenuStyle<C, S, IT, P>)
-    where
-        C: PixelColor,
-        S: IndicatorStyle,
-        IT: InteractionController,
-        P: SelectionIndicatorController;
-    fn title(&self) -> &str;
-    fn details(&self) -> &str;
-    fn value(&self) -> &str;
-    fn draw_styled<C, S, IT, P, DIS>(
-        &self,
-        style: &MenuStyle<C, S, IT, P>,
-        display: &mut DIS,
-    ) -> Result<(), DIS::Error>
-    where
-        C: PixelColor + From<Rgb888>,
-        S: IndicatorStyle,
-        IT: InteractionController,
-        P: SelectionIndicatorController,
-
-        DIS: DrawTarget<Color = C>;
-}
-
-#[derive(Clone, Copy)]
-enum MenuDisplayMode {
-    List(u16),
-    Details,
-}
-
-impl Default for MenuDisplayMode {
-    fn default() -> Self {
-        Self::List(0)
-    }
-}
-
-impl MenuDisplayMode {
-    fn is_list(&self) -> bool {
-        matches!(self, Self::List(_))
-    }
-
-    fn is_details(&self) -> bool {
-        matches!(self, Self::Details)
-    }
-}
+pub use embedded_menu_macros::SelectValue;
 
 #[derive(Copy, Clone, Debug)]
 pub enum DisplayScrollbar {
@@ -96,54 +50,48 @@ pub enum DisplayScrollbar {
 }
 
 #[derive(Copy, Clone, Debug)]
-pub struct MenuStyle<C, S, IT, P>
-where
-    C: PixelColor,
-    S: IndicatorStyle,
-    IT: InteractionController,
-    P: SelectionIndicatorController,
-{
-    pub(crate) color: C,
+pub struct MenuStyle<S, IT, P, R, T> {
+    pub(crate) theme: T,
     pub(crate) scrollbar: DisplayScrollbar,
     pub(crate) font: &'static MonoFont<'static>,
     pub(crate) title_font: &'static MonoFont<'static>,
-    pub(crate) details_delay: Option<u16>,
-    pub(crate) interaction: IT,
+    pub(crate) input_adapter: IT,
     pub(crate) indicator: Indicator<P, S>,
+    _marker: PhantomData<R>,
 }
 
-impl Default for MenuStyle<BinaryColor, LineIndicator, Programmed, StaticPosition> {
+impl<R> Default for MenuStyle<LineIndicator, Programmed, StaticPosition, R, BinaryColor> {
     fn default() -> Self {
         Self::new(BinaryColor::On)
     }
 }
 
-impl<C> MenuStyle<C, LineIndicator, Programmed, StaticPosition>
+impl<T, R> MenuStyle<LineIndicator, Programmed, StaticPosition, R, T>
 where
-    C: PixelColor,
+    T: Theme,
 {
-    pub const fn new(color: C) -> Self {
+    pub const fn new(theme: T) -> Self {
         Self {
-            color,
+            theme,
             scrollbar: DisplayScrollbar::Auto,
             font: &FONT_6X10,
             title_font: &FONT_6X10,
-            details_delay: None,
-            interaction: Programmed,
+            input_adapter: Programmed,
             indicator: Indicator {
                 style: LineIndicator,
                 controller: StaticPosition,
             },
+            _marker: PhantomData,
         }
     }
 }
 
-impl<C, S, IT, P> MenuStyle<C, S, IT, P>
+impl<S, IT, P, R, T> MenuStyle<S, IT, P, R, T>
 where
-    C: PixelColor,
     S: IndicatorStyle,
-    IT: InteractionController,
+    IT: InputAdapterSource<R>,
     P: SelectionIndicatorController,
+    T: Theme,
 {
     pub const fn with_font(self, font: &'static MonoFont<'static>) -> Self {
         Self { font, ..self }
@@ -157,70 +105,66 @@ where
         Self { scrollbar, ..self }
     }
 
-    pub const fn with_details_delay(self, frames: u16) -> Self {
-        Self {
-            details_delay: Some(frames),
-            ..self
-        }
-    }
-
-    pub const fn with_selection_indicator<S2>(self, indicator_style: S2) -> MenuStyle<C, S2, IT, P>
+    pub const fn with_selection_indicator<S2>(
+        self,
+        indicator_style: S2,
+    ) -> MenuStyle<S2, IT, P, R, T>
     where
         S2: IndicatorStyle,
     {
         MenuStyle {
-            color: self.color,
+            theme: self.theme,
             scrollbar: self.scrollbar,
             font: self.font,
             title_font: self.title_font,
-            details_delay: self.details_delay,
-            interaction: self.interaction,
+            input_adapter: self.input_adapter,
             indicator: Indicator {
                 style: indicator_style,
                 controller: self.indicator.controller,
             },
+            _marker: PhantomData,
         }
     }
 
-    pub const fn with_interaction_controller<IT2>(self, interaction: IT2) -> MenuStyle<C, S, IT2, P>
+    pub const fn with_input_adapter<IT2>(self, input_adapter: IT2) -> MenuStyle<S, IT2, P, R, T>
     where
-        IT2: InteractionController,
+        IT2: InputAdapterSource<R>,
     {
         MenuStyle {
-            interaction,
-            color: self.color,
+            theme: self.theme,
+            input_adapter,
             scrollbar: self.scrollbar,
             font: self.font,
             title_font: self.title_font,
-            details_delay: self.details_delay,
             indicator: self.indicator,
+            _marker: PhantomData,
         }
     }
 
     pub const fn with_animated_selection_indicator(
-        &self,
+        self,
         frames: i32,
-    ) -> MenuStyle<C, S, IT, AnimatedPosition> {
+    ) -> MenuStyle<S, IT, AnimatedPosition, R, T> {
         MenuStyle {
-            interaction: self.interaction,
-            color: self.color,
+            theme: self.theme,
+            input_adapter: self.input_adapter,
             scrollbar: self.scrollbar,
             font: self.font,
             title_font: self.title_font,
-            details_delay: self.details_delay,
             indicator: Indicator {
                 style: self.indicator.style,
                 controller: AnimatedPosition::new(frames),
             },
+            _marker: PhantomData,
         }
     }
 
-    pub fn text_style(&self) -> MonoTextStyle<'static, C> {
-        MonoTextStyle::new(self.font, self.color)
+    pub fn text_style(&self) -> MonoTextStyle<'static, BinaryColor> {
+        MonoTextStyle::new(self.font, BinaryColor::On)
     }
 
-    pub fn title_style(&self) -> MonoTextStyle<'static, C> {
-        MonoTextStyle::new(self.title_font, self.color)
+    pub fn title_style(&self) -> MonoTextStyle<'static, T::Color> {
+        MonoTextStyle::new(self.title_font, self.theme.text_color())
     }
 }
 
@@ -228,39 +172,37 @@ pub struct NoItems;
 
 pub struct MenuState<IT, P, S>
 where
-    IT: InteractionController,
+    IT: InputAdapter,
     P: SelectionIndicatorController,
     S: IndicatorStyle,
 {
     selected: usize,
-    recompute_targets: bool,
     list_offset: i32,
-    display_mode: MenuDisplayMode,
     interaction_state: IT::State,
     indicator_state: IndicatorState<P, S>,
+    last_input_state: InputState,
 }
 
 impl<IT, P, S> Default for MenuState<IT, P, S>
 where
-    IT: InteractionController,
+    IT: InputAdapter,
     P: SelectionIndicatorController,
     S: IndicatorStyle,
 {
     fn default() -> Self {
         Self {
             selected: 0,
-            recompute_targets: Default::default(),
             list_offset: Default::default(),
-            display_mode: Default::default(),
             interaction_state: Default::default(),
             indicator_state: Default::default(),
+            last_input_state: InputState::Idle,
         }
     }
 }
 
 impl<IT, P, S> Clone for MenuState<IT, P, S>
 where
-    IT: InteractionController,
+    IT: InputAdapter,
     P: SelectionIndicatorController,
     S: IndicatorStyle,
 {
@@ -271,7 +213,7 @@ where
 
 impl<IT, P, S> Copy for MenuState<IT, P, S>
 where
-    IT: InteractionController,
+    IT: InputAdapter,
     P: SelectionIndicatorController,
     S: IndicatorStyle,
 {
@@ -279,140 +221,171 @@ where
 
 impl<IT, P, S> MenuState<IT, P, S>
 where
-    IT: InteractionController,
+    IT: InputAdapter,
     P: SelectionIndicatorController,
     S: IndicatorStyle,
 {
-    fn change_selected_item(&mut self, new_selected: usize) {
-        if new_selected != self.selected {
-            self.selected = new_selected;
-            self.recompute_targets = true;
-        }
-    }
-
     pub fn reset_interaction(&mut self) {
         self.interaction_state = Default::default();
     }
+
+    fn set_selected_item<ITS, R, T>(
+        &mut self,
+        selected: usize,
+        items: &impl MenuItemCollection<R>,
+        style: &MenuStyle<S, ITS, P, R, T>,
+    ) where
+        ITS: InputAdapterSource<R, InputAdapter = IT>,
+        T: Theme,
+    {
+        let selected =
+            Navigation::JumpTo(selected)
+                .calculate_selection(self.selected, items.count(), |i| items.selectable(i));
+        self.selected = selected;
+
+        let selected_offset = items.bounds_of(selected).top_left.y;
+
+        style
+            .indicator
+            .change_selected_item(selected_offset, &mut self.indicator_state);
+    }
 }
 
-pub struct Menu<T, IT, VG, R, C, P, S>
+pub struct Menu<T, IT, VG, R, P, S, C>
 where
     T: AsRef<str>,
-    IT: InteractionController,
-    C: PixelColor,
+    IT: InputAdapterSource<R>,
     P: SelectionIndicatorController,
     S: IndicatorStyle,
+    C: Theme,
 {
     _return_type: PhantomData<R>,
     title: T,
     items: VG,
-    style: MenuStyle<C, S, IT, P>,
-    state: MenuState<IT, P, S>,
+    style: MenuStyle<S, IT, P, R, C>,
+    state: MenuState<IT::InputAdapter, P, S>,
 }
 
-impl<T, R, C, S> Menu<T, Programmed, NoItems, R, C, StaticPosition, S>
+impl<T, R, S, C> Menu<T, Programmed, NoItems, R, StaticPosition, S, C>
 where
     T: AsRef<str>,
-    C: PixelColor,
     S: IndicatorStyle,
+    C: Theme,
 {
-    pub fn new(title: T) -> MenuBuilder<T, Programmed, NoItems, R, C, StaticPosition, S>
+    /// Creates a new menu builder with the given title.
+    pub fn build(title: T) -> MenuBuilder<T, Programmed, NoItems, R, StaticPosition, S, C>
     where
-        MenuStyle<C, S, Programmed, StaticPosition>: Default,
+        MenuStyle<S, Programmed, StaticPosition, R, C>: Default,
     {
         Self::with_style(title, MenuStyle::default())
     }
 }
 
-impl<T, IT, R, C, P, S> Menu<T, IT, NoItems, R, C, P, S>
+impl<T, IT, R, P, S, C> Menu<T, IT, NoItems, R, P, S, C>
 where
     T: AsRef<str>,
-    C: PixelColor,
     S: IndicatorStyle,
-    IT: InteractionController,
+    IT: InputAdapterSource<R>,
     P: SelectionIndicatorController,
+    C: Theme,
 {
+    /// Creates a new menu builder with the given title and style.
     pub fn with_style(
         title: T,
-        style: MenuStyle<C, S, IT, P>,
-    ) -> MenuBuilder<T, IT, NoItems, R, C, P, S> {
+        style: MenuStyle<S, IT, P, R, C>,
+    ) -> MenuBuilder<T, IT, NoItems, R, P, S, C> {
         MenuBuilder::new(title, style)
     }
 }
 
-impl<T, IT, VG, R, C, P, S> Menu<T, IT, VG, R, C, P, S>
+impl<T, IT, VG, R, P, S, C> Menu<T, IT, VG, R, P, S, C>
 where
     T: AsRef<str>,
-    IT: InteractionController,
+    IT: InputAdapterSource<R>,
     VG: MenuItemCollection<R>,
-    C: PixelColor,
     P: SelectionIndicatorController,
     S: IndicatorStyle,
+    C: Theme,
 {
-    fn selected_has_details(&self) -> bool {
-        !self.items.details_of(self.state.selected).is_empty()
-    }
-
-    pub fn interact(&mut self, input: IT::Input) -> Option<R> {
-        if let Some(threshold) = self.style.details_delay {
-            self.state.display_mode = MenuDisplayMode::List(threshold);
-        }
-
-        let count = self.items.count();
-        match self
+    pub fn interact(&mut self, input: <IT::InputAdapter as InputAdapter>::Input) -> Option<R> {
+        let input = self
             .style
-            .interaction
-            .update(&mut self.state.interaction_state, input)
-        {
-            Some(InteractionType::Next) => {
-                let selected = (self.state.selected + 1) % count;
+            .input_adapter
+            .adapter()
+            .handle_input(&mut self.state.interaction_state, input);
 
-                self.state.change_selected_item(selected);
-            }
-            Some(InteractionType::Previous) => {
-                let selected = self.state.selected.checked_sub(1).unwrap_or(count - 1);
+        self.state.last_input_state = match input {
+            InputResult::Interaction(_) => InputState::Idle,
+            InputResult::StateUpdate(state) => state,
+        };
 
-                self.state.change_selected_item(selected);
-            }
-            Some(InteractionType::Select) => {
-                return Some(self.items.interact_with(self.state.selected));
-            }
-            None => {}
+        match input {
+            InputResult::Interaction(interaction) => match interaction {
+                Interaction::Navigation(navigation) => {
+                    let count = self.items.count();
+                    let new_selected =
+                        navigation.calculate_selection(self.state.selected, count, |i| {
+                            self.items.selectable(i)
+                        });
+                    if new_selected != self.state.selected {
+                        self.state
+                            .set_selected_item(new_selected, &self.items, &self.style);
+                    }
+                    None
+                }
+                Interaction::Action(Action::Select) => {
+                    let value = self.items.interact_with(self.state.selected);
+                    Some(value)
+                }
+                Interaction::Action(Action::Return(value)) => Some(value),
+            },
+            _ => None,
         }
-
-        None
     }
 
-    pub fn state(&self) -> MenuState<IT, P, S> {
+    pub fn state(&self) -> MenuState<IT::InputAdapter, P, S> {
         self.state
     }
 }
 
-impl<T, IT, VG, R, C, P, S> Menu<T, IT, VG, R, C, P, S>
+impl<T, IT, VG, R, P, S, C> Menu<T, IT, VG, R, P, S, C>
 where
     T: AsRef<str>,
-    IT: InteractionController,
-    VG: ViewGroup + MenuItemCollection<R>,
-    C: PixelColor + From<Rgb888>,
+    R: Copy,
+    IT: InputAdapterSource<R>,
+    VG: MenuItemCollection<R>,
+    C: Theme,
     P: SelectionIndicatorController,
     S: IndicatorStyle,
+{
+    pub fn selected_value(&self) -> R {
+        self.items.value_of(self.state.selected)
+    }
+}
+
+impl<T, IT, VG, R, C, P, S> Menu<T, IT, VG, R, P, S, C>
+where
+    T: AsRef<str>,
+    IT: InputAdapterSource<R>,
+    VG: ViewGroup + MenuItemCollection<R>,
+    P: SelectionIndicatorController,
+    S: IndicatorStyle,
+    C: Theme,
 {
     fn header<'t>(
         &self,
         title: &'t str,
-        display: &impl Dimensions,
-    ) -> Option<impl View + 't + Drawable<Color = C>>
+        display_area: Rectangle,
+    ) -> Option<impl View + 't + Drawable<Color = C::Color>>
     where
-        C: 't,
+        C: Theme + 't,
     {
         if title.is_empty() {
             return None;
         }
 
-        let display_area = display.bounding_box();
-
         let text_style = self.style.title_style();
-        let thin_stroke = PrimitiveStyle::with_stroke(self.style.color, 1);
+        let thin_stroke = PrimitiveStyle::with_stroke(self.style.theme.text_color(), 1);
         let header = LinearLayout::vertical(
             Chain::new(TextBox::with_textbox_style(
                 title,
@@ -434,142 +407,70 @@ where
         Some(header)
     }
 
+    fn top_offset(&self) -> i32 {
+        self.style.indicator.offset(&self.state.indicator_state) - self.state.list_offset
+    }
+
     pub fn update(&mut self, display: &impl Dimensions) {
-        if self.style.details_delay.is_some() && self.selected_has_details() {
-            if let MenuDisplayMode::List(ref mut timeout) = self.state.display_mode {
-                *timeout = timeout.saturating_sub(1);
-                if *timeout == 0 {
-                    self.state.display_mode = MenuDisplayMode::Details;
-                }
-            }
-        }
-
-        if !self.state.display_mode.is_list() {
-            return;
-        }
-
-        let display_area = display.bounding_box();
-        let display_size = display_area.size();
-
-        let content_area = if let Some(header) = self.header(self.title.as_ref(), display) {
-            display_area.resized_height(display_size.height - header.size().height, AnchorY::Bottom)
-        } else {
-            display_area
-        };
-
-        // Reset positions
-        self.items
-            .align_to_mut(&display_area, horizontal::Left, vertical::Top);
-
-        // Height of the selection indicator
-        let selected_item_bounds = self.items.bounds_of(self.state.selected);
-
         // animations
-        if self.state.recompute_targets {
-            self.state.recompute_targets = false;
-            self.style.indicator.change_selected_item(
-                selected_item_bounds.top_left.y,
-                &mut self.state.indicator_state,
-            );
-        }
+        self.style
+            .indicator
+            .update(self.state.last_input_state, &mut self.state.indicator_state);
 
-        let menu_height = content_area.size().height;
+        // Ensure selection indicator is always visible by moving the menu list.
+        let top_distance = self.top_offset();
 
-        let list_height = self.items.bounds().size().height;
-        let draw_scrollbar = match self.style.scrollbar {
-            DisplayScrollbar::Display => true,
-            DisplayScrollbar::Hide => false,
-            DisplayScrollbar::Auto => list_height > menu_height,
-        };
+        let list_offset_change = if top_distance > 0 {
+            let display_area = display.bounding_box();
+            let display_height = display_area.size().height as i32;
 
-        let menu_display_area = if draw_scrollbar {
-            let scrollbar_area = content_area.resized_width(2, AnchorX::Right);
+            let header_height = if let Some(header) = self.header(self.title.as_ref(), display_area)
+            {
+                header.size().height as i32
+            } else {
+                0
+            };
 
-            content_area.resized_width(
-                content_area.size().width - scrollbar_area.size().width,
-                AnchorX::Left,
-            )
-        } else {
-            content_area
-        };
-
-        self.style.indicator.update(
-            self.style.interaction.fill_area_width(
-                &self.state.interaction_state,
-                menu_display_area.size().width,
-            ),
-            &mut self.state.indicator_state,
-        );
-
-        // Ensure selection indicator is always visible
-        let top_distance =
-            self.style.indicator.offset(&self.state.indicator_state) - self.state.list_offset;
-        self.state.list_offset += if top_distance > 0 {
-            let indicator_height = self.style.indicator.item_height(
-                selected_item_bounds.size().height,
-                &self.state.indicator_state,
-            ) as i32;
+            let selected_height = MenuItemCollection::bounds_of(&self.items, self.state.selected)
+                .size()
+                .height as i32;
+            let indicator_height = self
+                .style
+                .indicator
+                .item_height(selected_height, &self.state.indicator_state);
 
             // Indicator is below display top. We only have to
             // move if indicator bottom is below display bottom.
-            (top_distance + indicator_height - menu_height as i32).max(0)
+            (top_distance + indicator_height + header_height - display_height).max(0)
         } else {
             // We need to move up
             top_distance
         };
 
-        self.items
-            .translate_mut(Point::new(0, -self.state.list_offset));
-    }
-
-    fn display_details<D>(&self, display: &mut D) -> Result<(), D::Error>
-    where
-        D: DrawTarget<Color = C>,
-    {
-        let display_area = display.bounding_box();
-        let display_size = display_area.size();
-
-        let header = self.header(self.items.title_of(self.state.selected), display);
-        let content_area = if let Some(ref header) = header {
-            display_area.resized_height(display_size.height - header.size().height, AnchorY::Bottom)
-        } else {
-            display_area
-        };
-
-        let details = TextBox::new(
-            self.items.details_of(self.state.selected),
-            content_area,
-            self.style.text_style(),
-        )
-        .with_margin(0, 0, 0, 1);
-
-        if let Some(header) = header {
-            LinearLayout::vertical(Chain::new(header).append(details))
-                .arrange()
-                .draw(display)?;
-        } else {
-            details.draw(display)?;
-        }
-
-        Ok(())
+        // Move menu list.
+        self.state.list_offset += list_offset_change;
     }
 }
 
-impl<T, IT, VG, R, P, S> Menu<T, IT, VG, R, BinaryColor, P, S>
+impl<T, IT, VG, R, C, P, S> Drawable for Menu<T, IT, VG, R, P, S, C>
 where
     T: AsRef<str>,
-    IT: InteractionController,
+    IT: InputAdapterSource<R>,
     VG: ViewGroup + MenuItemCollection<R>,
     P: SelectionIndicatorController,
     S: IndicatorStyle,
+    C: Theme,
 {
-    fn display_list<D>(&self, display: &mut D) -> Result<(), D::Error>
+    type Color = C::Color;
+    type Output = ();
+
+    fn draw<D>(&self, display: &mut D) -> Result<(), D::Error>
     where
-        D: DrawTarget<Color = BinaryColor>,
+        D: DrawTarget<Color = C::Color>,
     {
         let display_area = display.bounding_box();
 
-        let header = self.header(self.title.as_ref(), display);
+        let header = self.header(self.title.as_ref(), display_area);
         let content_area = if let Some(header) = header {
             header.draw(display)?;
             display_area.resized_height(
@@ -580,9 +481,9 @@ where
             display_area
         };
 
-        let menu_height = content_area.size().height;
+        let menu_height = content_area.size().height as i32;
+        let list_height = self.items.bounds().size().height as i32;
 
-        let list_height = self.items.bounds().size().height;
         let draw_scrollbar = match self.style.scrollbar {
             DisplayScrollbar::Display => true,
             DisplayScrollbar::Hide => false,
@@ -591,9 +492,9 @@ where
 
         let menu_display_area = if draw_scrollbar {
             let scrollbar_area = content_area.resized_width(2, AnchorX::Right);
-            let thin_stroke = PrimitiveStyle::with_stroke(self.style.color, 1);
+            let thin_stroke = PrimitiveStyle::with_stroke(self.style.theme.text_color(), 1);
 
-            let scale = |value| (value * menu_height / list_height) as i32;
+            let scale = |value| value * menu_height / list_height;
 
             let scrollbar_height = scale(menu_height).max(1);
             let mut scrollbar_display = display.cropped(&scrollbar_area);
@@ -601,7 +502,7 @@ where
             // Start scrollbar from y=1, so we have a margin on top instead of bottom
             Line::new(Point::new(0, 1), Point::new(0, scrollbar_height))
                 .into_styled(thin_stroke)
-                .translate(Point::new(1, scale(self.state.list_offset as u32)))
+                .translate(Point::new(1, scale(self.state.list_offset)))
                 .draw(&mut scrollbar_display)?;
 
             content_area.resized_width(
@@ -612,45 +513,21 @@ where
             content_area
         };
 
-        let selected_menuitem_height = self.items.bounds_of(self.state.selected).size().height;
+        let selected_menuitem_height =
+            MenuItemCollection::bounds_of(&self.items, self.state.selected)
+                .size()
+                .height as i32;
+
         self.style.indicator.draw(
             selected_menuitem_height,
-            self.style.indicator.offset(&self.state.indicator_state) - self.state.list_offset,
-            self.style.interaction.fill_area_width(
-                &self.state.interaction_state,
-                menu_display_area.size().width,
-            ),
-            &mut display
-                .clipped(&menu_display_area)
-                .cropped(&menu_display_area),
+            self.top_offset(),
+            self.state.last_input_state,
+            display.cropped(&menu_display_area),
             &self.items,
             &self.style,
-            &self.state.indicator_state,
+            &self.state,
         )?;
 
         Ok(())
-    }
-}
-
-impl<T, IT, VG, R, P, S> Drawable for Menu<T, IT, VG, R, BinaryColor, P, S>
-where
-    T: AsRef<str>,
-    IT: InteractionController,
-    VG: ViewGroup + MenuItemCollection<R>,
-    P: SelectionIndicatorController,
-    S: IndicatorStyle,
-{
-    type Color = BinaryColor;
-    type Output = ();
-
-    fn draw<D>(&self, display: &mut D) -> Result<(), D::Error>
-    where
-        D: DrawTarget<Color = BinaryColor>,
-    {
-        if self.state.display_mode.is_details() && self.selected_has_details() {
-            self.display_details(display)
-        } else {
-            self.display_list(display)
-        }
     }
 }

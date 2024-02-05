@@ -1,14 +1,16 @@
 use embedded_graphics::{
-    pixelcolor::BinaryColor,
     prelude::{DrawTarget, Point},
     primitives::Rectangle,
-    Drawable,
+    transform::Transform,
 };
-use embedded_layout::View;
 
-use crate::selection_indicator::{
-    style::{triangle::Arrow, IndicatorStyle},
-    Insets,
+use crate::{
+    interaction::InputState,
+    selection_indicator::{
+        style::{interpolate, triangle::Arrow, IndicatorStyle},
+        Insets,
+    },
+    theme::Theme,
 };
 
 #[derive(Clone, Copy)]
@@ -35,17 +37,17 @@ impl IndicatorStyle for AnimatedTriangle {
         state.current = 0;
     }
 
-    fn update(&self, state: &mut Self::State, fill_width: u32) {
-        state.current = if fill_width == 0 {
+    fn update(&self, state: &mut Self::State, input_state: InputState) {
+        state.current = if input_state == InputState::Idle {
             (state.current + 1) % self.period
         } else {
             0
         };
     }
 
-    fn margin(&self, _state: &Self::State, height: u32) -> Insets {
+    fn padding(&self, _state: &Self::State, height: i32) -> Insets {
         Insets {
-            left: height as i32 / 2 + 1,
+            left: height / 2 + 1,
             top: 0,
             right: 0,
             bottom: 0,
@@ -53,7 +55,7 @@ impl IndicatorStyle for AnimatedTriangle {
     }
 
     fn shape(&self, state: &Self::State, bounds: Rectangle, fill_width: u32) -> Self::Shape {
-        let max_offset = Arrow::tip_width(bounds);
+        let max_offset = Self::Shape::tip_width(bounds);
 
         let half_move = self.period / 5;
         let rest = 3 * half_move;
@@ -71,14 +73,29 @@ impl IndicatorStyle for AnimatedTriangle {
         Arrow::new(bounds, fill_width).translate(Point::new(-offset, 0))
     }
 
-    fn draw<D>(&self, state: &Self::State, fill_width: u32, display: &mut D) -> Result<(), D::Error>
+    fn draw<T, D>(
+        &self,
+        state: &Self::State,
+        input_state: InputState,
+        theme: &T,
+        display: &mut D,
+    ) -> Result<Self::Shape, D::Error>
     where
-        D: DrawTarget<Color = BinaryColor>,
+        T: Theme,
+        D: DrawTarget<Color = T::Color>,
     {
         let display_area = display.bounding_box();
 
-        self.shape(state, display_area, fill_width).draw(display)?;
+        let fill_width = if let InputState::InProgress(progress) = input_state {
+            interpolate(progress as u32, 0, 255, 0, display_area.size.width)
+        } else {
+            0
+        };
 
-        Ok(())
+        let shape = self.shape(state, display_area, fill_width);
+
+        shape.draw(theme.selection_color(), display)?;
+
+        Ok(shape)
     }
 }

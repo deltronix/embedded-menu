@@ -1,6 +1,6 @@
 use embedded_graphics::{
-    prelude::{DrawTarget, Size},
-    primitives::{Primitive, PrimitiveStyle, Rectangle},
+    prelude::DrawTarget,
+    primitives::{Primitive, PrimitiveStyle, Rectangle as RectangleShape},
     Drawable,
 };
 
@@ -14,10 +14,10 @@ use crate::{
 };
 
 #[derive(Clone, Copy)]
-pub struct Line;
+pub struct Rectangle;
 
-impl IndicatorStyle for Line {
-    type Shape = Rectangle;
+impl IndicatorStyle for Rectangle {
+    type Shape = RectangleShape;
     type State = ();
 
     fn padding(&self, _state: &Self::State, _height: i32) -> Insets {
@@ -29,11 +29,8 @@ impl IndicatorStyle for Line {
         }
     }
 
-    fn shape(&self, _state: &Self::State, bounds: Rectangle, fill_width: u32) -> Self::Shape {
-        Rectangle::new(
-            bounds.top_left,
-            Size::new(fill_width.max(1), bounds.size.height),
-        )
+    fn shape(&self, _state: &Self::State, bounds: RectangleShape, _fill_width: u32) -> Self::Shape {
+        bounds
     }
 
     fn draw<T, D>(

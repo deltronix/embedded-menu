@@ -1,40 +1,21 @@
-//! Run using `cargo run --example scrolling --target x86_64-pc-windows-msvc`
+//! Run using `cargo run --example scrolling --target x86_64-pc-windows-msvc` --features=simulator
 
 use embedded_graphics::{pixelcolor::BinaryColor, prelude::Size, Drawable};
 use embedded_graphics_simulator::{
-    sdl2::Keycode, BinaryColorTheme, OutputSettingsBuilder, SimulatorDisplay, SimulatorEvent,
-    Window,
+    BinaryColorTheme, OutputSettingsBuilder, SimulatorDisplay, Window,
 };
 use embedded_menu::{
-    interaction::{programmed::Programmed, InteractionType},
-    items::{select::SelectValue, NavigationItem, Select},
+    interaction::simulator::Simulator,
+    items::MenuItem,
     selection_indicator::{style::line::Line, AnimatedPosition},
-    Menu, MenuState, MenuStyle,
+    Menu, MenuState, MenuStyle, SelectValue,
 };
 
-#[derive(Copy, Clone, PartialEq)]
+#[derive(Copy, Clone, PartialEq, SelectValue)]
 pub enum TestEnum {
     A,
     B,
     C,
-}
-
-impl SelectValue for TestEnum {
-    fn next(&self) -> Self {
-        match self {
-            TestEnum::A => TestEnum::B,
-            TestEnum::B => TestEnum::C,
-            TestEnum::C => TestEnum::A,
-        }
-    }
-
-    fn name(&self) -> &'static str {
-        match self {
-            TestEnum::A => "A",
-            TestEnum::B => "AB",
-            TestEnum::C => "ABC",
-        }
-    }
 }
 
 #[derive(Clone, Copy)]
@@ -43,81 +24,66 @@ struct MenuData {
     select: TestEnum,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Default, Clone, Copy)]
 enum MenuEvent {
     SliceCheckbox(usize, bool),
     Select(TestEnum),
+    #[default]
     Nothing,
+    Quit,
 }
 
 fn do_loop(
     window: &mut Window,
-    state: &mut MenuState<Programmed, AnimatedPosition, Line>,
+    state: &mut MenuState<Simulator<MenuEvent>, AnimatedPosition, Line>,
     data: &mut MenuData,
     item_count: usize,
 ) -> bool {
-    let style = MenuStyle::new(BinaryColor::On).with_animated_selection_indicator(10);
+    let style = MenuStyle::new(BinaryColor::On)
+        .with_input_adapter(Simulator {
+            page_size: 5,
+            esc_value: MenuEvent::Quit,
+        })
+        .with_animated_selection_indicator(10);
 
     let title = format!("{item_count} items");
 
     for _ in 0..60 {
         let mut items = (0..item_count)
             .map(|i| {
-                Select::new("Changing", data.slice_data[i])
-                    .with_value_converter(match i {
-                        0 => |data| MenuEvent::SliceCheckbox(0, data),
-                        1 => |data| MenuEvent::SliceCheckbox(1, data),
-                        2 => |data| MenuEvent::SliceCheckbox(2, data),
-                        3 => |data| MenuEvent::SliceCheckbox(3, data),
-                        4 => |data| MenuEvent::SliceCheckbox(4, data),
-                        _ => panic!(),
-                    })
-                    .with_detail_text("Description")
+                MenuItem::new("Changing", data.slice_data[i]).with_value_converter(match i {
+                    0 => |data| MenuEvent::SliceCheckbox(0, data),
+                    1 => |data| MenuEvent::SliceCheckbox(1, data),
+                    2 => |data| MenuEvent::SliceCheckbox(2, data),
+                    3 => |data| MenuEvent::SliceCheckbox(3, data),
+                    4 => |data| MenuEvent::SliceCheckbox(4, data),
+                    _ => panic!(),
+                })
             })
             .take(item_count)
             .collect::<Vec<_>>();
 
         let mut menu = Menu::with_style(&title, style)
-            .add_item(
-                NavigationItem::new("Foo", MenuEvent::Nothing)
-                    .with_marker(">")
-                    .with_detail_text("Some longer description text"),
-            )
-            .add_items(&mut items)
-            .add_item(
-                Select::new("Check this too", data.select)
-                    .with_detail_text("Description")
-                    .with_value_converter(MenuEvent::Select),
-            )
+            .add_item("Foo", ">", |_| MenuEvent::Nothing)
+            .add_section_title("  Dynamic items")
+            .add_menu_items(&mut items)
+            .add_section_title("  Non-Dynamic")
+            .add_item("Check this too", data.select, MenuEvent::Select)
             .build_with_state(*state);
 
-        let mut display: SimulatorDisplay<BinaryColor> = SimulatorDisplay::new(Size::new(128, 64));
+        let mut display = SimulatorDisplay::new(Size::new(128, 64));
 
         menu.update(&display);
         menu.draw(&mut display).unwrap();
         window.update(&display);
 
         for event in window.events() {
-            let change = match event {
-                SimulatorEvent::KeyDown {
-                    keycode,
-                    repeat: false,
-                    ..
-                } => match keycode {
-                    Keycode::Return => menu.interact(InteractionType::Select),
-                    Keycode::Up => menu.interact(InteractionType::Previous),
-                    Keycode::Down => menu.interact(InteractionType::Next),
-                    _ => None,
-                },
-                SimulatorEvent::Quit => return false,
-                _ => None,
-            };
-
-            if let Some(change) = change {
+            if let Some(change) = menu.interact(event) {
                 match change {
                     MenuEvent::SliceCheckbox(idx, value) => data.slice_data[idx] = value,
                     MenuEvent::Select(select) => data.select = select,
                     MenuEvent::Nothing => {}
+                    MenuEvent::Quit => return false,
                 }
             }
         }

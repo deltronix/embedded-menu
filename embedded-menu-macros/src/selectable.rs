@@ -19,9 +19,9 @@ pub fn expand_next_fn(input: &DataEnum) -> syn::Result<TokenStream> {
         });
 
     Ok(quote! {
-        match self {
+        *self = match self {
             #(#branches),*
-        }
+        };
     })
 }
 
@@ -71,12 +71,12 @@ pub fn expand_select_value(input: DeriveInput) -> syn::Result<TokenStream> {
     let name_body = expand_name_fn(data)?;
 
     Ok(quote! {
-        impl embedded_menu::items::select::SelectValue for #enum_name {
-            fn next(&self) -> Self {
+        impl embedded_menu::items::menu_item::SelectValue for #enum_name {
+            fn next(&mut self) {
                 #next_body
             }
 
-            fn name(&self) -> &'static str {
+            fn marker(&self) -> &str {
                 #name_body
             }
         }
